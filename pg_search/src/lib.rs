@@ -111,8 +111,7 @@ pub extern "C" fn pg_search_insert_worker(_arg: pg_sys::Datum) {
     shared::trace::init_ereport_logger("pg_search");
 
     debug!("starting pg_search insert worker at PID {}", process::id());
-    let writer = writer::Writer::new();
-    let mut server = writer::Server::new(writer).expect("error starting writer server");
+    let mut server = writer::Server::new().expect("error starting writer server");
 
     // Retrieve the assigned port and assign to global state.
     // Note that we do not dereference the WRITER to mutate it, due to PGRX shared struct rules.

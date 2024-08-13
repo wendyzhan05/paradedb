@@ -15,53 +15,47 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-use super::{Handler, IndexError, ServerRequest};
-use crate::writer::transfer;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use std::io;
-use std::marker::PhantomData;
+use super::{Handler, IndexError, ServerRequest, WriterDirectory, WriterRequest};
+use crate::writer::{transfer, Writer};
+use rayon::ThreadPool;
+use std::collections::HashMap;
+use std::io::Cursor;
 use std::path::Path;
-use std::{cell::RefCell, io::Cursor};
+use std::sync::Arc;
+use std::{io, sync::Mutex};
+use tantivy::IndexWriter;
 use thiserror::Error;
 use tracing::{debug, error};
 
 /// A generic server for receiving requests and transfers from a client.
-pub struct Server<'a, T, H>
-where
-    T: DeserializeOwned,
-    H: Handler<T>,
-{
+pub struct Server {
     addr: std::net::SocketAddr,
     http: tiny_http::Server,
-    handler: RefCell<H>,
-    marker: PhantomData<&'a T>,
+    thread_pool: ThreadPool,
+    tantivy_writers: Arc<Mutex<HashMap<WriterDirectory, IndexWriter>>>,
 }
 
-impl<'a, T, H> Server<'a, T, H>
-where
-    T: Serialize + DeserializeOwned + 'a,
-    H: Handler<T>,
-{
-    pub fn new(handler: H) -> Result<Self, ServerError> {
+impl Server {
+    pub fn new() -> Result<Self, ServerError> {
         let http = tiny_http::Server::http("0.0.0.0:0")
             .map_err(|err| ServerError::AddressBindFailed(err.to_string()))?;
 
         let addr = match http.server_addr() {
             tiny_http::ListenAddr::IP(addr) => addr,
-            // It's not clear when tiny_http would choose to use a Unix socket address,
-            // but we have to handle the enum variant, so we'll consider this outcome
-            // an irrecovereable error, although its not expected to happen.
             tiny_http::ListenAddr::Unix(addr) => {
                 return Err(ServerError::UnixSocketBindAttempt(format!("{addr:?}")))
             }
         };
 
+        let thread_pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+
+        let tantivy_writers = Arc::new(Mutex::new(HashMap::new()));
+
         Ok(Self {
             addr,
             http,
-            handler: RefCell::new(handler),
-            marker: PhantomData,
+            thread_pool, // Initialize the thread pool
+            tantivy_writers,
         })
     }
 
@@ -73,13 +67,14 @@ where
         self.listen_request()
     }
 
-    fn listen_transfer<P: AsRef<Path>>(&self, pipe_path: P) -> Result<(), ServerError> {
+    fn listen_transfer<P: AsRef<Path>>(
+        pipe_path: P,
+        tantivy_writers: Arc<Mutex<HashMap<WriterDirectory, IndexWriter>>>,
+    ) -> Result<(), ServerError> {
         // Our consumer will receive messages suitable for our handler.
-        for incoming in transfer::read_stream::<T, P>(pipe_path)? {
-            self.handler
-                .borrow_mut()
-                .handle(incoming?)
-                .map_err(ServerError::Anyhow)?;
+        for incoming in transfer::read_stream::<WriterRequest, P>(pipe_path)? {
+            let mut handler = Writer::new(tantivy_writers.clone());
+            handler.handle(incoming?).map_err(ServerError::Anyhow)?;
         }
         Ok(())
     }
@@ -94,46 +89,57 @@ where
 
     fn listen_request(&mut self) -> Result<(), ServerError> {
         debug!(address = %self.addr, "listening to incoming requests");
-        for mut incoming in self.http.incoming_requests() {
-            let reader = incoming.as_reader();
-            let request: Result<ServerRequest<T>, ServerError> = bincode::deserialize_from(reader)
-                .map_err(|err| ServerError::Unexpected(err.into()));
 
-            match request {
-                Ok(req) => match req {
-                    ServerRequest::Shutdown => {
-                        if let Err(err) = incoming.respond(Self::response_ok()) {
-                            error!("server error responding to shutdown: {err}");
-                        }
-                        return Ok(());
-                    }
-                    ServerRequest::Transfer(pipe_path) => {
-                        // We must respond with OK before initiating the transfer.
-                        if let Err(err) = incoming.respond(Self::response_ok()) {
-                            error!("server error responding to transfer: {err}");
-                        } else if let Err(err) = self.listen_transfer(pipe_path) {
-                            error!("error listening to transfer: {err}")
-                        }
-                    }
-                    ServerRequest::Request(req) => {
-                        if let Err(err) = self.handler.borrow_mut().handle(req) {
-                            if let Err(err) =
-                                incoming.respond(Self::response_err(ServerError::Anyhow(err)))
-                            {
-                                error!("server error responding to handler error: {err}");
+        self.thread_pool.install(|| {
+            for mut incoming in self.http.incoming_requests() {
+                let tantivy_writers = Arc::clone(&self.tantivy_writers);
+
+                self.thread_pool.spawn(move || {
+                    let reader = incoming.as_reader();
+                    let request: Result<ServerRequest<WriterRequest>, ServerError> =
+                        bincode::deserialize_from(reader)
+                            .map_err(|err| ServerError::Unexpected(err.into()));
+
+                    match request {
+                        Ok(req) => match req {
+                            ServerRequest::Shutdown => {
+                                if let Err(err) = incoming.respond(Self::response_ok()) {
+                                    error!("server error responding to shutdown: {err}");
+                                }
                             }
-                        } else if let Err(err) = incoming.respond(Self::response_ok()) {
-                            error!("server error responding to handler success: {err}")
+                            ServerRequest::Transfer(pipe_path) => {
+                                if let Err(err) = incoming.respond(Self::response_ok()) {
+                                    error!("server error responding to transfer: {err}");
+                                } else if let Err(err) =
+                                    Self::listen_transfer(pipe_path, tantivy_writers)
+                                {
+                                    error!("error listening to transfer: {err}")
+                                }
+                            }
+                            ServerRequest::Request(req) => {
+                                let mut handler = Writer::new(tantivy_writers.clone());
+                                if let Err(err) = handler.handle(req) {
+                                    if let Err(err) = incoming
+                                        .respond(Self::response_err(ServerError::Anyhow(err)))
+                                    {
+                                        error!("server error responding to handler error: {err}");
+                                    }
+                                } else if let Err(err) = incoming.respond(Self::response_ok()) {
+                                    error!("server error responding to handler success: {err}")
+                                }
+                            }
+                        },
+                        Err(err) => {
+                            if let Err(err) = incoming.respond(Self::response_err(err)) {
+                                error!(
+                                    "server error responding to client on deserialize error: {err}"
+                                );
+                            }
                         }
-                    }
-                },
-                Err(err) => {
-                    if let Err(err) = incoming.respond(Self::response_err(err)) {
-                        error!("server error responding to client on deserialize error: {err}");
-                    }
-                }
-            };
-        }
+                    };
+                });
+            }
+        });
 
         unreachable!("server should never stop listening");
     }
