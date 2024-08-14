@@ -71,11 +71,11 @@ impl EreportLogger {
         let mut buffer = self.buffer.lock().unwrap();
         while let Some((level, log)) = buffer.pop_front() {
             match level {
-                Level::TRACE => pgrx::debug1!("{log}"),
+                Level::TRACE => pgrx::log!("{log}"),
                 Level::DEBUG => pgrx::log!("{log}"),
-                Level::INFO => pgrx::info!("{log}"),
-                Level::WARN => pgrx::warning!("{log}"),
-                Level::ERROR => pgrx::error!("{log}"),
+                Level::INFO => pgrx::log!("{log}"),
+                Level::WARN => pgrx::log!("{log}"),
+                Level::ERROR => pgrx::log!("{log}"),
             }
         }
     }

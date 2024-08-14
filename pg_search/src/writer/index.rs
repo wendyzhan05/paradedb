@@ -161,8 +161,8 @@ impl Writer {
 }
 
 impl Handler<WriterRequest> for Writer {
+    #[tracing::instrument(skip(self), level = "trace")]
     fn handle(&mut self, request: WriterRequest) -> Result<()> {
-        pgrx::log!("HANDLING REQUEST: {request:#?}");
         match request {
             WriterRequest::Insert {
                 directory,

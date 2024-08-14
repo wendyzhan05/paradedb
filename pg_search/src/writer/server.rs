@@ -21,11 +21,12 @@ use rayon::ThreadPool;
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{io, sync::Mutex};
 use tantivy::IndexWriter;
 use thiserror::Error;
-use tracing::{debug, error};
+use tracing::debug;
 
 /// A generic server for receiving requests and transfers from a client.
 pub struct Server {
@@ -33,6 +34,7 @@ pub struct Server {
     http: tiny_http::Server,
     thread_pool: ThreadPool,
     tantivy_writers: Arc<Mutex<HashMap<WriterDirectory, IndexWriter>>>,
+    shutdown_flag: Arc<AtomicBool>,
 }
 
 impl Server {
@@ -50,12 +52,14 @@ impl Server {
         let thread_pool = rayon::ThreadPoolBuilder::new().build().unwrap();
 
         let tantivy_writers = Arc::new(Mutex::new(HashMap::new()));
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
 
         Ok(Self {
             addr,
             http,
-            thread_pool, // Initialize the thread pool
+            thread_pool,
             tantivy_writers,
+            shutdown_flag,
         })
     }
 
@@ -70,11 +74,18 @@ impl Server {
     fn listen_transfer<P: AsRef<Path>>(
         pipe_path: P,
         tantivy_writers: Arc<Mutex<HashMap<WriterDirectory, IndexWriter>>>,
+        shutdown_flag: Arc<AtomicBool>,
     ) -> Result<(), ServerError> {
         // Our consumer will receive messages suitable for our handler.
         for incoming in transfer::read_stream::<WriterRequest, P>(pipe_path)? {
             let mut handler = Writer::new(tantivy_writers.clone());
             handler.handle(incoming?).map_err(ServerError::Anyhow)?;
+
+            // Check to make sure the server is still running. We must quit if we
+            // received shutdown.
+            if shutdown_flag.load(Ordering::SeqCst) {
+                return Ok(());
+            }
         }
         Ok(())
     }
@@ -91,47 +102,60 @@ impl Server {
         debug!(address = %self.addr, "listening to incoming requests");
 
         self.thread_pool.install(|| {
-            for mut incoming in self.http.incoming_requests() {
+            while !self.shutdown_flag.load(Ordering::SeqCst) {
+                let mut incoming = match self.http.recv() {
+                    Ok(incoming) => incoming,
+                    Err(err) => {
+                        debug!(?err, "writer server error receiving http request");
+                        continue;
+                    }
+                };
                 let tantivy_writers = Arc::clone(&self.tantivy_writers);
+                let shutdown_flag = Arc::clone(&self.shutdown_flag);
 
                 self.thread_pool.spawn(move || {
                     let reader = incoming.as_reader();
                     let request: Result<ServerRequest<WriterRequest>, ServerError> =
                         bincode::deserialize_from(reader)
                             .map_err(|err| ServerError::Unexpected(err.into()));
-
                     match request {
                         Ok(req) => match req {
                             ServerRequest::Shutdown => {
+                                debug!("writer server received shutdown");
                                 if let Err(err) = incoming.respond(Self::response_ok()) {
-                                    error!("server error responding to shutdown: {err}");
+                                    debug!("server error responding to shutdown: {err}");
                                 }
                             }
                             ServerRequest::Transfer(pipe_path) => {
+                                debug!(pipe_path, "writer server received transfer");
                                 if let Err(err) = incoming.respond(Self::response_ok()) {
-                                    error!("server error responding to transfer: {err}");
-                                } else if let Err(err) =
-                                    Self::listen_transfer(pipe_path, tantivy_writers)
-                                {
-                                    error!("error listening to transfer: {err}")
+                                    debug!("server error responding to transfer: {err}");
+                                } else if let Err(err) = Self::listen_transfer(
+                                    pipe_path,
+                                    tantivy_writers,
+                                    shutdown_flag.clone(),
+                                ) {
+                                    debug!("error listening to transfer: {err}")
                                 }
                             }
                             ServerRequest::Request(req) => {
+                                debug!(?req, "writer server received request");
                                 let mut handler = Writer::new(tantivy_writers.clone());
                                 if let Err(err) = handler.handle(req) {
                                     if let Err(err) = incoming
                                         .respond(Self::response_err(ServerError::Anyhow(err)))
                                     {
-                                        error!("server error responding to handler error: {err}");
+                                        debug!("server error responding to handler error: {err}");
                                     }
                                 } else if let Err(err) = incoming.respond(Self::response_ok()) {
-                                    error!("server error responding to handler success: {err}")
+                                    debug!("server error responding to handler success: {err}")
                                 }
                             }
                         },
                         Err(err) => {
+                            debug!(?err, "writer server failed to deserialize message");
                             if let Err(err) = incoming.respond(Self::response_err(err)) {
-                                error!(
+                                debug!(
                                     "server error responding to client on deserialize error: {err}"
                                 );
                             }
@@ -141,7 +165,11 @@ impl Server {
             }
         });
 
-        unreachable!("server should never stop listening");
+        debug!(
+            shutdown_flag = self.shutdown_flag.load(Ordering::SeqCst),
+            "writer server shutting down"
+        );
+        Ok(())
     }
 }
 

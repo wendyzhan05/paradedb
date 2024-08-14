@@ -153,6 +153,8 @@ pub extern "C" fn pg_search_shutdown_worker(_arg: pg_sys::Datum) {
     // Check every second to see if we've received SIGTERM.
     while BackgroundWorker::wait_latch(Some(Duration::from_secs(1))) {}
 
+    debug!("pg_search shutdown worker received SIGTERM");
+
     // We've received SIGTERM. Send a shutdown message to the HTTP server.
     let mut writer_client: writer::Client<writer::WriterRequest> =
         writer::Client::new(WRITER_GLOBAL.share().addr());
