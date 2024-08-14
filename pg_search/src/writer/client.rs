@@ -158,39 +158,39 @@ pub enum ClientError {
     SerdeError(#[from] serde_json::Error),
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use crate::fixtures::*;
-//     use crate::writer::{Client, Server, WriterClient, WriterRequest};
-//     use rstest::*;
-//     use std::thread;
+#[cfg(test)]
+mod tests {
+    use crate::fixtures::*;
+    use crate::writer::{Client, Server, WriterClient, WriterRequest};
+    use rstest::*;
+    use std::thread;
 
-//     #[rstest]
-//     #[case::insert_request(WriterRequest::Insert {
-//         directory: mock_dir().writer_dir,
-//         document: simple_doc(simple_schema(default_fields())),
-//     })]
-//     #[case::commit_request(WriterRequest::Commit { directory: mock_dir().writer_dir })]
-//     #[case::abort_request(WriterRequest::Abort {directory: mock_dir().writer_dir})]
-//     #[case::vacuum_request(WriterRequest::Vacuum { directory: mock_dir().writer_dir })]
-//     #[case::drop_index_request(WriterRequest::DropIndex { directory: mock_dir().writer_dir })]
-//     /// Test request serialization and transfer between client and server.
-//     fn test_client_request(#[case] request: WriterRequest) {
-//         // Create a handler that will test that the received request is the same as sent.
-//         let request_clone = request.clone();
-//         let handler = TestHandler::new(move |req: WriterRequest| assert_eq!(&req, &request_clone));
-//         let mut server = Server::new().unwrap();
-//         let addr = server.addr();
+    #[rstest]
+    #[case::insert_request(WriterRequest::Insert {
+        directory: mock_dir().writer_dir,
+        document: simple_doc(simple_schema(default_fields())),
+    })]
+    #[case::commit_request(WriterRequest::Commit { directory: mock_dir().writer_dir })]
+    #[case::abort_request(WriterRequest::Abort {directory: mock_dir().writer_dir})]
+    #[case::vacuum_request(WriterRequest::Vacuum { directory: mock_dir().writer_dir })]
+    #[case::drop_index_request(WriterRequest::DropIndex { directory: mock_dir().writer_dir })]
+    /// Test request serialization and transfer between client and server.
+    fn test_client_request(#[case] request: WriterRequest) {
+        // Create a handler that will test that the received request is the same as sent.
+        let request_clone = request.clone();
+        let handler = TestHandler::new(move |req: WriterRequest| assert_eq!(&req, &request_clone));
+        let mut server = Server::new(handler).unwrap();
+        let addr = server.addr();
 
-//         // Start the server in a new thread, as it blocks once started.
-//         thread::spawn(move || {
-//             server.start().unwrap();
-//         });
+        // Start the server in a new thread, as it blocks once started.
+        thread::spawn(move || {
+            server.start().unwrap();
+        });
 
-//         let mut client: Client<WriterRequest> = Client::new(addr);
-//         client.request(request.clone()).unwrap();
+        let mut client: Client<WriterRequest> = Client::new(addr);
+        client.request(request.clone()).unwrap();
 
-//         // The server must be stopped, or this test will not finish.
-//         client.stop_server().unwrap();
-//     }
-// }
+        // The server must be stopped, or this test will not finish.
+        client.stop_server().unwrap();
+    }
+}

@@ -15,11 +15,6 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
-
 use uuid::Uuid;
 
 use crate::{
@@ -44,8 +39,7 @@ impl MockSearchIndex {
         // instance is dropped.
         // We can pass a fixed index OID as a mock.
         let directory = MockWriterDirectory::new(42);
-        let mock_map = HashMap::new();
-        let mut writer = Writer::new(Arc::new(Mutex::new(mock_map)));
+        let mut writer = Writer::new();
         let uuid = Uuid::new_v4().to_string();
         writer
             .create_index(directory.writer_dir.clone(), fields, uuid, key_field_index)

@@ -25,7 +25,7 @@ use std::os::unix::prelude::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
-use tracing::debug;
+use tracing::error;
 
 use crate::writer::ServerError;
 
@@ -140,10 +140,10 @@ impl<T: Serialize> Drop for WriterTransferProducer<T> {
     fn drop(&mut self) {
         let pipe_path = self.pipe_path.clone();
         if let Err(err) = self.write_done_message() {
-            debug!("error sending writer transfer done message: {err:?}")
+            error!("error sending writer transfer done message: {err:?}")
         };
         if let Err(err) = std::fs::remove_file(&pipe_path) {
-            debug!("error removing named pipe path {pipe_path:?}: {err:?}");
+            error!("error removing named pipe path {pipe_path:?}: {err:?}");
         }
     }
 }

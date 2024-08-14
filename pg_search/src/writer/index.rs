@@ -23,38 +23,36 @@ use crate::{
     },
 };
 use anyhow::{Context, Result};
-use std::{
-    collections::{hash_map::Entry::Vacant, HashMap},
-    sync::{Arc, Mutex},
+use std::collections::{
+    hash_map::Entry::{Occupied, Vacant},
+    HashMap,
 };
 use tantivy::{schema::Field, Index, IndexWriter};
 
 /// The entity that interfaces with Tantivy indexes.
 pub struct Writer {
-    /// Thread-safe map of index directory path to Tantivy writer instance.
-    tantivy_writers: Arc<Mutex<HashMap<WriterDirectory, IndexWriter>>>,
+    /// Map of index directory path to Tantivy writer instance.
+    tantivy_writers: HashMap<WriterDirectory, IndexWriter>,
 }
 
 impl Writer {
-    pub fn new(tantivy_writers: Arc<Mutex<HashMap<WriterDirectory, IndexWriter>>>) -> Self {
-        Self { tantivy_writers }
+    pub fn new() -> Self {
+        Self {
+            tantivy_writers: HashMap::new(),
+        }
     }
 
     /// Check the writer server cache for an existing IndexWriter. If it does not exist,
     /// then retrieve the SearchIndex and use it to create a new IndexWriter, caching it.
-    fn get_locked_tantivy_writers(
-        &self,
-        directory: WriterDirectory,
-    ) -> Result<std::sync::MutexGuard<'_, HashMap<WriterDirectory, IndexWriter>>, IndexError> {
-        let mut writers = self.tantivy_writers.lock().unwrap(); // Lock the cache for safe access
-
-        if let Vacant(entry) = writers.entry(directory.clone()) {
-            let writer = SearchIndex::writer(&directory)
-                .map_err(|err| IndexError::GetWriterFailed(directory.clone(), err.to_string()))?;
-            entry.insert(writer);
+    fn get_writer(&mut self, directory: WriterDirectory) -> Result<&mut IndexWriter, IndexError> {
+        match self.tantivy_writers.entry(directory.clone()) {
+            Vacant(entry) => {
+                Ok(entry.insert(SearchIndex::writer(&directory).map_err(|err| {
+                    IndexError::GetWriterFailed(directory.clone(), err.to_string())
+                })?))
+            }
+            Occupied(entry) => Ok(entry.into_mut()),
         }
-
-        Ok(writers) // Return the MutexGuard containing the HashMap
     }
 
     fn insert(
@@ -62,9 +60,10 @@ impl Writer {
         directory: WriterDirectory,
         document: SearchDocument,
     ) -> Result<(), IndexError> {
-        let mut writers = self.get_locked_tantivy_writers(directory.clone())?;
-        let writer = writers.get_mut(&directory).unwrap();
+        let writer = self.get_writer(directory)?;
+        // Add the Tantivy document to the index.
         writer.add_document(document.into())?;
+
         Ok(())
     }
 
@@ -74,8 +73,7 @@ impl Writer {
         ctid_field: &Field,
         ctid_values: &[u64],
     ) -> Result<(), IndexError> {
-        let mut writers = self.get_locked_tantivy_writers(directory.clone())?;
-        let writer = writers.get_mut(&directory).unwrap();
+        let writer = self.get_writer(directory)?;
         for ctid in ctid_values {
             let ctid_term = tantivy::Term::from_field_u64(*ctid_field, *ctid);
             writer.delete_term(ctid_term);
@@ -85,8 +83,7 @@ impl Writer {
 
     fn commit(&mut self, directory: WriterDirectory) -> Result<()> {
         if directory.exists()? {
-            let mut writers = self.get_locked_tantivy_writers(directory.clone())?;
-            let writer = writers.get_mut(&directory).unwrap();
+            let writer = self.get_writer(directory.clone())?;
             writer
                 .prepare_commit()
                 .context("error preparing commit to tantivy index")?;
@@ -104,8 +101,7 @@ impl Writer {
     fn abort(&mut self, directory: WriterDirectory) -> Result<(), IndexError> {
         // If the transaction was aborted, we should roll back the writer to the last commit.
         // Otherwise, partialy written data could stick around for the next transaction.
-        let mut writers = self.get_locked_tantivy_writers(directory.clone())?;
-        if let Some(writer) = writers.get_mut(&directory) {
+        if let Some(writer) = self.tantivy_writers.get_mut(&directory) {
             writer.rollback()?;
         }
 
@@ -113,8 +109,7 @@ impl Writer {
     }
 
     fn vacuum(&mut self, directory: WriterDirectory) -> Result<(), IndexError> {
-        let mut writers = self.get_locked_tantivy_writers(directory.clone())?;
-        let writer = writers.get_mut(&directory).unwrap();
+        let writer = self.get_writer(directory)?;
         writer.garbage_collect_files().wait()?;
         Ok(())
     }
@@ -150,8 +145,7 @@ impl Writer {
     }
 
     fn drop_index(&mut self, directory: WriterDirectory) -> Result<(), IndexError> {
-        let mut writers = self.get_locked_tantivy_writers(directory.clone())?;
-        if let Some(writer) = writers.remove(&directory) {
+        if let Some(writer) = self.tantivy_writers.remove(&directory) {
             std::mem::drop(writer);
         };
 
@@ -161,7 +155,6 @@ impl Writer {
 }
 
 impl Handler<WriterRequest> for Writer {
-    #[tracing::instrument(skip(self), level = "trace")]
     fn handle(&mut self, request: WriterRequest) -> Result<()> {
         match request {
             WriterRequest::Insert {

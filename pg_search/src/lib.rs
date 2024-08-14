@@ -111,7 +111,8 @@ pub extern "C" fn pg_search_insert_worker(_arg: pg_sys::Datum) {
     shared::trace::init_ereport_logger("pg_search");
 
     debug!("starting pg_search insert worker at PID {}", process::id());
-    let mut server = writer::Server::new().expect("error starting writer server");
+    let writer = writer::Writer::new();
+    let mut server = writer::Server::new(writer).expect("error starting writer server");
 
     // Retrieve the assigned port and assign to global state.
     // Note that we do not dereference the WRITER to mutate it, due to PGRX shared struct rules.
@@ -152,8 +153,6 @@ pub extern "C" fn pg_search_shutdown_worker(_arg: pg_sys::Datum) {
 
     // Check every second to see if we've received SIGTERM.
     while BackgroundWorker::wait_latch(Some(Duration::from_secs(1))) {}
-
-    debug!("pg_search shutdown worker received SIGTERM");
 
     // We've received SIGTERM. Send a shutdown message to the HTTP server.
     let mut writer_client: writer::Client<writer::WriterRequest> =

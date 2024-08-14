@@ -16,10 +16,7 @@
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 use crate::writer::{ClientError, Handler, Writer, WriterClient, WriterRequest};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 pub struct TestClient {
     writer: Writer,
@@ -33,9 +30,8 @@ impl Default for TestClient {
 
 impl TestClient {
     pub fn new() -> Self {
-        let mock_map = HashMap::new();
         Self {
-            writer: Writer::new(Arc::new(Mutex::new(mock_map))),
+            writer: Writer::new(),
         }
     }
 

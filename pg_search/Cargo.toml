@@ -53,7 +53,6 @@ zstd-sys = "=2.0.9"
 chrono = "0.4.38"
 ordered-float = "4.2.0"
 uuid = "1.10.0"
-rayon = "1.10.0"
 
 [dev-dependencies]
 approx = "0.5.1"
