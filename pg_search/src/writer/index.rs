@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-use super::{Handler, IndexError, SearchFs, WriterDirectory, WriterRequest};
+use super::{Handler, IndexError, SearchFs, TransactionState, WriterDirectory, WriterRequest};
 use crate::{
     index::SearchIndex,
     schema::{
@@ -23,35 +23,31 @@ use crate::{
     },
 };
 use anyhow::{Context, Result};
-use std::collections::{
-    hash_map::Entry::{Occupied, Vacant},
-    HashMap,
-};
 use tantivy::{schema::Field, Index, IndexWriter};
 
 /// The entity that interfaces with Tantivy indexes.
+#[derive(Default)]
 pub struct Writer {
-    /// Map of index directory path to Tantivy writer instance.
-    tantivy_writers: HashMap<WriterDirectory, IndexWriter>,
+    tantivy_writer: Option<IndexWriter>,
 }
 
 impl Writer {
-    pub fn new() -> Self {
-        Self {
-            tantivy_writers: HashMap::new(),
-        }
-    }
-
     /// Check the writer server cache for an existing IndexWriter. If it does not exist,
     /// then retrieve the SearchIndex and use it to create a new IndexWriter, caching it.
     fn get_writer(&mut self, directory: WriterDirectory) -> Result<&mut IndexWriter, IndexError> {
-        match self.tantivy_writers.entry(directory.clone()) {
-            Vacant(entry) => {
-                Ok(entry.insert(SearchIndex::writer(&directory).map_err(|err| {
-                    IndexError::GetWriterFailed(directory.clone(), err.to_string())
-                })?))
-            }
-            Occupied(entry) => Ok(entry.into_mut()),
+        if self.tantivy_writer.is_some() {
+            Ok(self
+                .tantivy_writer
+                .as_mut()
+                .expect("unwrapping validated option"))
+        } else {
+            let writer = SearchIndex::writer(&directory)
+                .map_err(|err| IndexError::GetWriterFailed(directory.clone(), err.to_string()))?;
+            self.tantivy_writer = Some(writer);
+            Ok(self
+                .tantivy_writer
+                .as_mut()
+                .expect("unwrapping validated option"))
         }
     }
 
@@ -98,10 +94,10 @@ impl Writer {
         Ok(())
     }
 
-    fn abort(&mut self, directory: WriterDirectory) -> Result<(), IndexError> {
+    fn abort(&mut self, _directory: WriterDirectory) -> Result<(), IndexError> {
         // If the transaction was aborted, we should roll back the writer to the last commit.
         // Otherwise, partialy written data could stick around for the next transaction.
-        if let Some(writer) = self.tantivy_writers.get_mut(&directory) {
+        if let Some(writer) = self.tantivy_writer.as_mut() {
             writer.rollback()?;
         }
 
@@ -145,9 +141,9 @@ impl Writer {
     }
 
     fn drop_index(&mut self, directory: WriterDirectory) -> Result<(), IndexError> {
-        if let Some(writer) = self.tantivy_writers.remove(&directory) {
-            std::mem::drop(writer);
-        };
+        if let Some(writer) = self.tantivy_writer.take() {
+            std::mem::drop(writer)
+        }
 
         directory.remove()?;
         Ok(())
@@ -155,17 +151,25 @@ impl Writer {
 }
 
 impl Handler<WriterRequest> for Writer {
-    fn handle(&mut self, request: WriterRequest) -> Result<()> {
+    fn handle(&mut self, request: WriterRequest) -> Result<TransactionState> {
+        // All variants should return 'Continue', other than 'Commit' and 'Abort',
+        // which will end the server transaction.
         match request {
             WriterRequest::Insert {
                 directory,
                 document,
-            } => Ok(self.insert(directory, document)?),
+            } => {
+                self.insert(directory, document)?;
+                Ok(TransactionState::Continue)
+            }
             WriterRequest::Delete {
                 directory,
                 field,
                 ctids,
-            } => Ok(self.delete(directory, &field, &ctids)?),
+            } => {
+                self.delete(directory, &field, &ctids)?;
+                Ok(TransactionState::Continue)
+            }
             WriterRequest::CreateIndex {
                 directory,
                 fields,
@@ -177,12 +181,24 @@ impl Handler<WriterRequest> for Writer {
                 // to be rebuilt and this method is called again.
                 self.drop_index(directory.clone())?;
                 self.create_index(directory, fields, uuid, key_field_index)?;
-                Ok(())
+                Ok(TransactionState::Continue)
             }
-            WriterRequest::DropIndex { directory } => Ok(self.drop_index(directory)?),
-            WriterRequest::Commit { directory } => Ok(self.commit(directory)?),
-            WriterRequest::Abort { directory } => Ok(self.abort(directory)?),
-            WriterRequest::Vacuum { directory } => Ok(self.vacuum(directory)?),
+            WriterRequest::DropIndex { directory } => {
+                self.drop_index(directory)?;
+                Ok(TransactionState::Continue)
+            }
+            WriterRequest::Commit { directory } => {
+                self.commit(directory)?;
+                Ok(TransactionState::Complete)
+            }
+            WriterRequest::Abort { directory } => {
+                self.abort(directory)?;
+                Ok(TransactionState::Complete)
+            }
+            WriterRequest::Vacuum { directory } => {
+                self.vacuum(directory)?;
+                Ok(TransactionState::Continue)
+            }
         }
     }
 }

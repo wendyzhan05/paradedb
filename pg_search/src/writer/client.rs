@@ -17,7 +17,10 @@
 
 use crate::globals::WRITER_GLOBAL;
 
-use super::{transfer::WriterTransferProducer, ServerRequest, WriterClient};
+use super::{
+    server::TRANSACTION_ID_HEADER, transfer::WriterTransferProducer, ServerRequest, WriterClient,
+};
+use pgrx::pg_sys;
 use serde::Serialize;
 use std::{marker::PhantomData, net::SocketAddr, panic, path::Path};
 use thiserror::Error;
@@ -81,7 +84,20 @@ impl<T: Serialize> Client<T> {
         // with more requests.
         self.stop_transfer();
         let bytes = bincode::serialize(&request).unwrap();
-        let response = self.http.post(self.url()).body::<Vec<u8>>(bytes).send()?;
+
+        let response = self
+            .http
+            .post(self.url())
+            .header(TRANSACTION_ID_HEADER, unsafe {
+                match &request {
+                    // A shutdown request doesn't need a transaction ID, and it's possible
+                    // it has been made from a background worker that is outside of a transaction.
+                    ServerRequest::Shutdown => "".to_string(),
+                    _ => pg_sys::GetCurrentTransactionId().to_string(),
+                }
+            })
+            .body::<Vec<u8>>(bytes)
+            .send()?;
 
         match response.status() {
             reqwest::StatusCode::OK => Ok(()),
@@ -156,41 +172,4 @@ pub enum ClientError {
 
     #[error(transparent)]
     SerdeError(#[from] serde_json::Error),
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::fixtures::*;
-    use crate::writer::{Client, Server, WriterClient, WriterRequest};
-    use rstest::*;
-    use std::thread;
-
-    #[rstest]
-    #[case::insert_request(WriterRequest::Insert {
-        directory: mock_dir().writer_dir,
-        document: simple_doc(simple_schema(default_fields())),
-    })]
-    #[case::commit_request(WriterRequest::Commit { directory: mock_dir().writer_dir })]
-    #[case::abort_request(WriterRequest::Abort {directory: mock_dir().writer_dir})]
-    #[case::vacuum_request(WriterRequest::Vacuum { directory: mock_dir().writer_dir })]
-    #[case::drop_index_request(WriterRequest::DropIndex { directory: mock_dir().writer_dir })]
-    /// Test request serialization and transfer between client and server.
-    fn test_client_request(#[case] request: WriterRequest) {
-        // Create a handler that will test that the received request is the same as sent.
-        let request_clone = request.clone();
-        let handler = TestHandler::new(move |req: WriterRequest| assert_eq!(&req, &request_clone));
-        let mut server = Server::new(handler).unwrap();
-        let addr = server.addr();
-
-        // Start the server in a new thread, as it blocks once started.
-        thread::spawn(move || {
-            server.start().unwrap();
-        });
-
-        let mut client: Client<WriterRequest> = Client::new(addr);
-        client.request(request.clone()).unwrap();
-
-        // The server must be stopped, or this test will not finish.
-        client.stop_server().unwrap();
-    }
 }

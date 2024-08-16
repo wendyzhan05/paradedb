@@ -18,25 +18,14 @@
 use crate::writer::{ClientError, Handler, Writer, WriterClient, WriterRequest};
 use std::sync::{Arc, Mutex};
 
+#[derive(Default)]
 pub struct TestClient {
     writer: Writer,
 }
 
-impl Default for TestClient {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl TestClient {
-    pub fn new() -> Self {
-        Self {
-            writer: Writer::new(),
-        }
-    }
-
     pub fn new_arc() -> Arc<Mutex<Self>> {
-        Arc::new(Mutex::new(Self::new()))
+        Arc::new(Mutex::new(Self::default()))
     }
 }
 
@@ -48,7 +37,8 @@ impl WriterClient<WriterRequest> for TestClient {
             bincode::deserialize(&serialized_request).unwrap();
         self.writer
             .handle(deserialized_request)
-            .map_err(|err| ClientError::ServerError(err.to_string()))
+            .map_err(|err| ClientError::ServerError(err.to_string()))?;
+        Ok(())
     }
 
     fn transfer<P: AsRef<std::path::Path>>(

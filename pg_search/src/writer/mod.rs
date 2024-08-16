@@ -78,11 +78,18 @@ enum ServerRequest<T: Serialize> {
     Shutdown,
 }
 
+/// Returned by a Server Handler to denote whether a transaction
+/// is still in progress, or whether it has completed.
+pub enum TransactionState {
+    Complete,
+    Continue,
+}
+
 /// This trait is the interface that binds the writer to the server.
 /// The two systems are otherwise decoupled, so they can be tested
 /// and re-used independently.
-pub trait Handler<T: DeserializeOwned> {
-    fn handle(&mut self, request: T) -> Result<(), anyhow::Error>;
+pub trait Handler<T: DeserializeOwned>: Default {
+    fn handle(&mut self, request: T) -> Result<TransactionState, anyhow::Error>;
 }
 
 pub trait WriterClient<T: Serialize> {

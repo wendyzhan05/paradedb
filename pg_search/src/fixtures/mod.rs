@@ -26,7 +26,6 @@ use crate::schema::{
 pub use crate::writer::SearchFs;
 pub use client::*;
 pub use directory::*;
-pub use handler::*;
 pub use index::*;
 pub use rstest::*;
 use serde_json::json;
