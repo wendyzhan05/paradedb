@@ -26,12 +26,13 @@ use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use thiserror::Error;
 use tracing::{debug, error, trace};
 
 pub const TRANSACTION_ID_HEADER: &str = "TransactionID";
 
+type IndexOID = u32;
 type TransactionID = u64;
 
 /// A generic server for receiving requests and transfers from a client.
@@ -44,7 +45,6 @@ where
     http: tiny_http::Server,
     marker: PhantomData<&'a T>,
     handler_marker: PhantomData<&'a H>,
-    // channels: RefCell<HashMap<TransactionID, Sender<tiny_http::Request>>>,
     channels: Arc<RwLock<HashMap<u64, Sender<tiny_http::Request>>>>,
     shutdown_flag: Arc<AtomicBool>,
 }
@@ -74,6 +74,7 @@ where
             marker: PhantomData,
             handler_marker: PhantomData,
             channels: Arc::new(RwLock::new(HashMap::new())),
+            index_locks: Arc::new(HashMap::new()),
             shutdown_flag: Arc::new(AtomicBool::new(false)),
         })
     }

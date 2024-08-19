@@ -24,6 +24,7 @@ mod transfer;
 use crate::schema::{SearchDocument, SearchFieldConfig, SearchFieldType};
 use crate::{postgres::types::TantivyValueError, schema::SearchFieldName};
 pub use client::{Client, ClientError};
+use dashmap::DashMap;
 pub use directory::*;
 pub use index::Writer;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -85,10 +86,13 @@ pub enum TransactionState {
     Continue,
 }
 
+type HandlerCache<K, V> = DashMap<K, V>;
+
 /// This trait is the interface that binds the writer to the server.
 /// The two systems are otherwise decoupled, so they can be tested
 /// and re-used independently.
-pub trait Handler<T: DeserializeOwned>: Default {
+pub trait Handler<C: Default, T: DeserializeOwned> {
+    fn new(cache: Arc<C>) -> Self;
     fn handle(&mut self, request: T) -> Result<TransactionState, anyhow::Error>;
 }
 

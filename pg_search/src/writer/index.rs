@@ -15,7 +15,11 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-use super::{Handler, IndexError, SearchFs, TransactionState, WriterDirectory, WriterRequest};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use super::{
+    Handler, HandlerCache, IndexError, SearchFs, TransactionState, WriterDirectory, WriterRequest,
+};
 use crate::{
     index::SearchIndex,
     schema::{
@@ -23,18 +27,35 @@ use crate::{
     },
 };
 use anyhow::{Context, Result};
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use tantivy::{schema::Field, Index, IndexWriter};
 
+// DashMap/DashSet allows for concurrent access to a HashMap/HashSet from different threads.
+// Instead of locking the whole HashMap, it only locks individual keys.
+type WriterDirectoryLocks = DashMap<WriterDirectory, Arc<Mutex<()>>>;
+
 /// The entity that interfaces with Tantivy indexes.
-#[derive(Default)]
-pub struct Writer {
+pub struct Writer<'a> {
+    cache: &'a DashMap<WriterDirectory, Mutex<()>>,
     tantivy_writer: Option<IndexWriter>,
+    writer_directory_locks: Vec<MutexGuard<'a, ()>>,
 }
 
-impl Writer {
+impl<'a> Writer<'a> {
     /// Check the writer server cache for an existing IndexWriter. If it does not exist,
     /// then retrieve the SearchIndex and use it to create a new IndexWriter, caching it.
     fn get_writer(&mut self, directory: WriterDirectory) -> Result<&mut IndexWriter, IndexError> {
+        // Fetch the Mutex<Writer> for the given directory from the global map
+        let writer_mutex = self
+            .cache
+            .entry(directory.clone())
+            .or_insert_with(|| Mutex::new(()));
+
+        let lock = writer_mutex.lock().unwrap();
+
+        self.writer_directory_locks.push(lock);
+
         if self.tantivy_writer.is_some() {
             Ok(self
                 .tantivy_writer
@@ -150,7 +171,14 @@ impl Writer {
     }
 }
 
-impl Handler<WriterRequest> for Writer {
+impl<'a> Handler<WriterDirectoryLocks, WriterRequest> for Writer<'a> {
+    fn new(cache: Arc<WriterDirectoryLocks>) -> Self {
+        Self {
+            cache,
+            ..Default::default()
+        }
+    }
+
     fn handle(&mut self, request: WriterRequest) -> Result<TransactionState> {
         // All variants should return 'Continue', other than 'Commit' and 'Abort',
         // which will end the server transaction.
