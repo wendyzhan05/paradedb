@@ -20,7 +20,6 @@ use crate::index::SearchIndex;
 use crate::postgres::types::TantivyValue;
 use crate::schema::SearchConfig;
 use crate::{env::needs_commit, writer::WriterDirectory};
-use pgrx::itemptr::u64_to_item_pointer;
 use pgrx::*;
 use tantivy::{DocAddress, Score};
 
@@ -121,7 +120,7 @@ pub extern "C" fn amgettuple(
     match iter.next() {
         Some((_, _, _, ctid)) => {
             let tid = &mut scan.xs_heaptid;
-            u64_to_item_pointer(ctid, tid);
+            crate::postgres::utils::u64_to_item_pointer(ctid, tid);
 
             true
         }
