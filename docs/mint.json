@@ -80,6 +80,7 @@
       "group": "Welcome",
       "pages": [
         "welcome/introduction",
+        "welcome/license",
         "welcome/support"
       ]
     },
