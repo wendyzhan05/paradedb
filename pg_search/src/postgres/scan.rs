@@ -120,7 +120,7 @@ pub extern "C" fn amgettuple(
     match iter.next() {
         Some((scored, _)) => {
             let tid = &mut scan.xs_heaptid;
-            crate::postgres::utils::u64_to_item_pointer(ctid, tid);
+            crate::postgres::utils::u64_to_item_pointer(scored.ctid, tid);
 
             true
         }
